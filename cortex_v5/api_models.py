@@ -38,6 +38,9 @@ class TaskSubmit(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=100_000)
     metadata: dict[str, Any] = Field(default_factory=dict)
     verification: VerificationSpec = Field(default_factory=VerificationSpec)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+    issue_id: str | None = Field(default=None, max_length=80)
+    issue_state: str | None = Field(default=None, max_length=40)
     autostart: bool = True
 
 

@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ModelChoice, SinkResult, TaskStatus
+from .fossil import FossilClient
 from .journal import Journal
 from .litellm import LiteLLMClient
 from .methodology import MethodologyEngine
 from .observability import EventRecorder, sanitize
+from .receipts import ReceiptStore, decide_skip, sha256_bytes
 from .seating import SeatingManager
 from .settings import Settings
 from .tools import ToolExecutor
@@ -57,16 +59,20 @@ class CortexRuntime:
         self.litellm = litellm or LiteLLMClient(
             settings.litellm_url,
             api_key=settings.litellm_api_key,
+            timeout=settings.litellm_timeout,
             event_callback=None,
         )
         self.clock = clock
         self.sleeper = sleeper
+        self.receipts = ReceiptStore(settings.data_dir)
+        self.fossil = FossilClient(settings.fossil_url)
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def close(self) -> None:
         await self.litellm.aclose()
         self.recorder.close()
         self.journal.close()
+        self.fossil.close()
 
     def _workspace(self, requested: str | None) -> Path:
         root = Path(requested or self.settings.allowed_root).expanduser().resolve(strict=True)
@@ -132,6 +138,9 @@ class CortexRuntime:
             "acceptance": acceptance,
             "max_tokens": int(values.get("max_tokens") or self.settings.default_max_tokens),
             "metadata": sanitize(dict(values.get("metadata") or {})),
+            "idempotency_key": str(values.get("idempotency_key") or "").strip() or None,
+            "issue_id": values.get("issue_id"),
+            "issue_state": values.get("issue_state"),
             "verification": dict(values.get("verification") or {}),
             "status": str(status),
             "methodology": decision.to_dict(),
@@ -176,6 +185,15 @@ class CortexRuntime:
                 "question_count": len(decision.questions),
             },
         )
+        skip = self._skip_verdict(task)
+        task["skip_decision"] = skip
+        if skip["decision"] == "skip":
+            task["status"] = str(TaskStatus.SKIPPED)
+            task["updated_at"] = self.clock()
+            self.journal.put(task_id, task)
+            await self._record(task_id, "task.skipped", {"reasons": skip["reasons"]})
+        else:
+            self.journal.put(task_id, task)
         return self.task_snapshot(task_id)
 
     async def answer(self, task_id: str, answers: Mapping[str, Any]) -> dict[str, Any]:
@@ -277,7 +295,7 @@ class CortexRuntime:
         lock = self._locks.setdefault(task_id, asyncio.Lock())
         async with lock:
             task = self.get_task(task_id)
-            if task["status"] == TaskStatus.COMPLETED:
+            if task["status"] in {TaskStatus.COMPLETED, TaskStatus.SKIPPED}:
                 return self.task_snapshot(task_id)
             if task["status"] == TaskStatus.WAITING_FOR_HUMAN:
                 raise RuntimeErrorState("human answers are required before execution")
@@ -505,6 +523,7 @@ class CortexRuntime:
                     task["status"] = str(TaskStatus.COMPLETED)
                     task["completed_at"] = self.clock()
                     task["updated_at"] = self.clock()
+                    task["execution_receipt"] = self._record_execution_receipt(task)
                     self.journal.put(task_id, task)
                     self.journal.append_outcome(
                         task_id,
@@ -603,6 +622,78 @@ class CortexRuntime:
                 },
             )
             return self.task_snapshot(task_id)
+
+    def _hashes(self, task: Mapping[str, Any]) -> tuple[str, str]:
+        spec = dict(task.get("verification") or {})
+        required = [str(item) for item in spec.get("required_files") or ()]
+        workspace = Path(str(task["workspace"]))
+        if required:
+            from .receipts import sha256_paths
+
+            outputs = sha256_paths(workspace, required)
+        else:
+            outputs = sha256_bytes(str(task.get("acceptance") or "").encode("utf-8"))
+        inputs = sha256_bytes(
+            json.dumps(
+                {
+                    "prompt": task.get("prompt"),
+                    "acceptance": task.get("acceptance"),
+                    "required_files": required,
+                    "commands": list(spec.get("commands") or []),
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        return inputs, outputs
+
+    def _skip_verdict(self, task: Mapping[str, Any]) -> dict[str, Any]:
+        key = str(task.get("idempotency_key") or "").strip()
+        if not key:
+            return {
+                "decision": "open",
+                "reasons": ["idempotency_key_missing"],
+                "receipt": None,
+                "authority": "execution_receipt",
+            }
+        inputs_hash, outputs_hash = self._hashes(task)
+        return decide_skip(
+            self.receipts,
+            idempotency_key=key,
+            live_inputs_hash=inputs_hash,
+            live_outputs_hash=outputs_hash,
+            issue_state=str(task.get("issue_state") or ""),
+        )
+
+    def _record_execution_receipt(self, task: Mapping[str, Any]) -> dict[str, Any]:
+        key = str(task.get("idempotency_key") or task["task_id"])
+        inputs_hash, outputs_hash = self._hashes(task)
+        record = self.receipts.append(
+            {
+                "idempotency_key": key,
+                "inputs_hash": inputs_hash,
+                "outputs_hash": outputs_hash,
+                "test_ids": list((task.get("verification") or {}).get("commands") or []),
+                "issue_id": task.get("issue_id"),
+                "issue_state": task.get("issue_state") or "closed",
+                "task_id": task["task_id"],
+                "origin": "verification_gate",
+                "created_at": self.clock(),
+            }
+        )
+        fossil = self.fossil.propose(
+            {
+                "event_type": "claim.proposed",
+                "payload": {
+                    "kind": "execution_receipt",
+                    "idempotency_key": key,
+                    "inputs_hash": inputs_hash,
+                    "outputs_hash": outputs_hash,
+                },
+            }
+        )
+        record["fossil"] = fossil
+        return record
 
     @staticmethod
     def _choose_model(

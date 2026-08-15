@@ -396,3 +396,41 @@ async def test_model_hidden_run_is_rejected_after_gate_authorization(tmp_path, m
         message for message in result["messages"] if message.get("tool_call_id") == "hidden-1"
     )
     assert "not present in the advertised schemas" in hidden_result["content"]
+
+
+async def test_matching_receipt_skips_without_model_and_closeout_is_ignored(tmp_path):
+    (tmp_path / "report.md").write_text("done", encoding="utf-8")
+    runtime, lite = make_runtime(
+        tmp_path,
+        [StreamCompletion(content="should not run", finish_reason="stop")],
+    )
+    first = await runtime.submit(
+        {
+            "prompt": "Research and report the observed state",
+            "workspace": str(tmp_path),
+            "acceptance": "A non-empty report is returned",
+            "idempotency_key": "eval-lab-homepage",
+            "issue_state": "closed",
+            "verification": {"required_files": ["report.md"], "require_output": True},
+        }
+    )
+    completed = await runtime.run(first["task_id"])
+    assert completed["status"] == "completed"
+    assert completed["execution_receipt"]["fossil"]["committed"] is False
+    assert lite.catalog_calls == 1
+
+    second = await runtime.submit(
+        {
+            "prompt": "Research and report the observed state",
+            "workspace": str(tmp_path),
+            "acceptance": "A non-empty report is returned",
+            "idempotency_key": "eval-lab-homepage",
+            "issue_state": "closed",
+            "verification": {"required_files": ["report.md"], "require_output": True},
+        }
+    )
+    assert second["status"] == "skipped"
+    assert second["skip_decision"]["decision"] == "skip"
+    replay = await runtime.run(second["task_id"])
+    assert replay["status"] == "skipped"
+    assert lite.catalog_calls == 1
