@@ -194,9 +194,9 @@ def _unresolved_questions(
     questions: list[str] = []
     substantive_answers = {str(k): v for k, v in answers.items() if v not in (None, "", [], {})}
     vague = len(prompt.split()) < 3 or bool(_AMBIGUOUS.search(prompt))
-    fork = (
-        bool(re.search(r"\b(?:or|either)\b", prompt, re.I)) and "choice" not in substantive_answers
-    )
+    fork = bool(
+        re.search(r"\b(?:either\s+.+\s+or|option a|choose one of)\b", prompt, re.I)
+    ) and "choice" not in substantive_answers
     if vague and "scope" not in substantive_answers:
         questions.append(
             "Which scope should I execute? A) Recommended: name the exact deliverable "

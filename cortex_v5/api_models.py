@@ -41,6 +41,7 @@ class TaskSubmit(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
     issue_id: str | None = Field(default=None, max_length=80)
     issue_state: str | None = Field(default=None, max_length=40)
+    models: list[str] = Field(default_factory=list, max_length=8)
     autostart: bool = True
 
 
