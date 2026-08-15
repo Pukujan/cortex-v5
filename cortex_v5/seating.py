@@ -1,17 +1,67 @@
-"""Deterministic live-catalog model seating and retry mechanics."""
+"""Deterministic live-catalog model seating and retry mechanics.
+
+Seating score, highest first: ``(available, tag_overlap, -tier, success - failure,
+success, model)``.  ``tier`` is the research-grounded priority from
+``docs/MODEL-SEATING-RESEARCH-2026-08.md`` (measured BigCodeBench-Hard results,
+per-model sources, and the cross-vendor rationale).  It is a documented prior, not
+an undocumented hard-coded list: availability and task-tag relevance outrank it,
+and the backoff/switch thresholds below override a persistently failing model.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Final
 
 from .contracts import ModelChoice
 
 INACTIVITY_PROBE_SECONDS = 300.0
 PROBE_FAILURE_LIMIT = 3
 CONTINUOUS_FAILURE_LIMIT = 20
-PREFERENCE_HINTS = ("grok-4.5", "qwen-3.6-max", "kimi-k3")
+
+# Research-grounded seat priority (lower index = higher priority).  Provenance and
+# per-model evidence: docs/MODEL-SEATING-RESEARCH-2026-08.md sections 2-4.  The
+# approved cross-vendor frontier starter is positions 0-4 (xAI, OpenAI, Moonshot,
+# Alibaba, Google); the remainder follows the consolidated public-benchmark ranking.
+# Catalog prefix duplicates (e.g. "[aws]deepseek-v3.2") normalize to the unprefixed
+# name via _tier().  Models absent from this tuple share _DEFAULT_TIER.
+MODEL_TIERS: Final[tuple[str, ...]] = (
+    "grok-4.6",
+    "gpt-5.6-sol",
+    "kimi-k3",
+    "qwen3.8-max",
+    "gemini-3.6-flash",
+    "gpt-5.5",
+    "gpt-5.6-terra",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-high",
+    "gpt-5.6-luna",
+    "glm-5.2",
+    "glm-5.2-metered",
+    "glm-5",
+    "minimax-m3",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "mimo-v2.5-pro",
+    "kimi-k2.7-code",
+    "kimi-k2-thinking",
+    "gemini-3.1-pro-preview",
+    "qwen3.6-plus",
+    "glm-5-turbo",
+    "minimax-m2.5",
+    "glm-4.7",
+    "deepseek-v3.2",
+    "gemini-3.1-flash-lite-preview",
+    "qwen3-coder-next",
+    "grok-4.5",
+    "qwen-3.6-max",
+    "gemini-3.1-pro-preview-search",
+    "gemini-3.5-flash-search",
+    "gemini-3.1-flash-lite-image",
+    "qwen3.7-flash",
+)
+_DEFAULT_TIER = len(MODEL_TIERS)
 
 
 @dataclass
@@ -41,6 +91,18 @@ def _tags(model: str) -> set[str]:
     return {part for part in model.lower().replace("/", "-").replace("_", "-").split("-") if part}
 
 
+def _tier(model: str) -> int:
+    """Research-grounded priority index (lower = higher priority).
+
+    Catalog prefix duplicates (``[aws]deepseek-v3.2``, ``[grok] grok-4.6``) map to
+    their unprefixed tier entry; anything unknown shares ``_DEFAULT_TIER``.
+    """
+    normalized = model.lower().strip()
+    if "[" in normalized and "]" in normalized:
+        normalized = normalized.split("]", 1)[1].strip()
+    return MODEL_TIERS.index(normalized) if normalized in MODEL_TIERS else _DEFAULT_TIER
+
+
 class SeatingManager:
     def __init__(self, *, state: Mapping[str, Any] | None = None) -> None:
         self.states: dict[str, ModelState] = {}
@@ -65,16 +127,8 @@ class SeatingManager:
             overlap = len(desired & _tags(model))
             success = outcome.get("success", state.successes)
             failure = outcome.get("failure", state.failures)
-            preference = next(
-                (
-                    len(PREFERENCE_HINTS) - i
-                    for i, hint in enumerate(PREFERENCE_HINTS)
-                    if hint in model.lower()
-                ),
-                0,
-            )
             available = state.eligible_at <= now
-            score = (int(available), overlap, success - failure, success, preference, model)
+            score = (int(available), overlap, -_tier(model), success - failure, success, model)
             probe = (
                 state.probe_active
                 or state.last_activity is None

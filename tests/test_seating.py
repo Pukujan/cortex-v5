@@ -1,4 +1,27 @@
-from cortex_v5.seating import SeatingManager
+from cortex_v5.seating import MODEL_TIERS, SeatingManager
+
+
+def test_research_tier_is_authoritative_and_deterministic():
+    seats = SeatingManager()
+    ranked = seats.rank(list(MODEL_TIERS), task_type="x", risk="low", now=0)
+    assert [choice.model for choice in ranked] == list(MODEL_TIERS)
+
+
+def test_tier_ranks_higher_than_unlisted_and_survives_input_order():
+    seats = SeatingManager()
+    models = ["other/code-high", "grok-4.6", "qwen3.7-flash"]
+    first = seats.rank(models, task_type="x", risk="low")
+    second = seats.rank(list(reversed(models)), task_type="x", risk="low")
+    assert first == second
+    assert first[0].model == "grok-4.6"
+    assert [choice.model for choice in first] == ["grok-4.6", "qwen3.7-flash", "other/code-high"]
+
+
+def test_catalog_prefix_duplicates_normalize_to_unprefixed_tier():
+    seats = SeatingManager()
+    ranked = seats.rank(["[aws]deepseek-v3.2", "deepseek-v3.2"], task_type="x", risk="low")
+    assert ranked[0].model == "deepseek-v3.2"
+    assert ranked[1].model == "[aws]deepseek-v3.2"
 
 
 def test_catalog_is_authoritative_and_ranking_is_deterministic():

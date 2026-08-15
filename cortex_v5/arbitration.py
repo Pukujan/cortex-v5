@@ -87,6 +87,7 @@ class MultiModelArbitrator:
         workspace_root: str | Path | None = None,
         max_tokens: int | None = None,
         max_tool_rounds: int | None = None,
+        verification_timeout: float | None = None,
         concurrency: int = 2,
     ) -> None:
         cleaned = tuple(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
@@ -106,6 +107,7 @@ class MultiModelArbitrator:
         self.workspace_root = root
         self.max_tokens = max_tokens or settings.default_max_tokens
         self.max_tool_rounds = max_tool_rounds or settings.max_tool_rounds
+        self.verification_timeout = verification_timeout or 60.0
         self.concurrency = concurrency
 
     async def close(self) -> None:
@@ -184,7 +186,11 @@ class MultiModelArbitrator:
         workspace = self.workspace_root / _slug(model, index)
         workspace.mkdir(parents=True, exist_ok=False)
         prepare_workspace(workspace)
-        executor = ToolExecutor(workspace, protected_paths=list(protected_paths))
+        executor = ToolExecutor(
+            workspace,
+            protected_paths=list(protected_paths),
+            timeout=self.verification_timeout,
+        )
         started = time.monotonic()
         try:
             output, tool_calls = await self._tool_loop(model, prompt, executor)

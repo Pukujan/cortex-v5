@@ -25,7 +25,20 @@ def main() -> int:
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
         return 2
     checker_code = compile(script.read_bytes(), str(script), "exec")
-    readable_roots = tuple(path.resolve() for path in {Path(sys.base_prefix), root})
+    # Allow the checker to import libraries installed for the interpreter (its
+    # site-packages) while still restricting writes to the workspace root.
+    # Reads of installed packages are trusted; the audit hook below continues
+    # to block writes outside the workspace, network, env mutation, and
+    # subprocess/exec.
+    _readable: set[Path] = {Path(sys.base_prefix).resolve(), root}
+    for _entry in sys.path:
+        try:
+            _resolved = Path(_entry).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if _resolved.is_dir():
+            _readable.add(_resolved)
+    readable_roots = tuple(sorted(_readable))
 
     def sensitive(candidate: Path) -> bool:
         private_paths = (*denied_paths, *protected_paths)
