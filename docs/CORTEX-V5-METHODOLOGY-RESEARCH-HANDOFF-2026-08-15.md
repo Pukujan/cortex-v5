@@ -4,6 +4,8 @@ Date: 2026-08-15
 
 Purpose: continue the V5 methodology/agent-runtime research before changing code. This is a decision and issue log, not an implementation plan approved for execution.
 
+Tracking issue: [#9](https://github.com/Pukujan/cortex-v5/issues/9).
+
 ## Confirmed owner decisions
 
 1. **V5 must be standalone.**
