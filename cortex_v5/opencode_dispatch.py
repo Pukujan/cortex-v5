@@ -242,6 +242,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     environment["LITELLM_URL"] = settings.litellm_url
     environment["LITELLM_MASTER_KEY"] = settings.litellm_api_key
     environment["OPENCODE_CONFIG"] = str(config)
+    environment["OPENCODE_CONFIG_CONTENT"] = config.read_text(encoding="utf-8")
 
     plans: list[dict[str, object]] = []
     commands: list[list[str]] = []
