@@ -50,6 +50,11 @@ def vendor_for(model: str) -> str | None:
     return _VENDOR_BY_MODEL.get(canonical_model(model))
 
 
+def agent_for_role(role: str) -> str:
+    """Map mutating roles to Build and non-mutating roles to restricted Plan."""
+    return "build" if role in _MUTATING_ROLES else "plan"
+
+
 def choose_cross_vendor(
     ranked: tuple[ModelChoice, ...], *, count: int, now: float
 ) -> tuple[ModelChoice, ...]:
@@ -81,6 +86,7 @@ def build_opencode_command(
     workspace: Path,
     packet: str,
     title: str,
+    agent: str,
     provider_id: str = _PROVIDER_ID,
     auto: bool = False,
 ) -> list[str]:
@@ -91,6 +97,8 @@ def build_opencode_command(
         "run",
         "--model",
         f"{provider_id}/{model}",
+        "--agent",
+        agent,
         "--dir",
         str(workspace),
         "--format",
@@ -244,6 +252,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     environment["OPENCODE_CONFIG"] = str(config)
     environment["OPENCODE_CONFIG_CONTENT"] = config.read_text(encoding="utf-8")
 
+    opencode_agent = agent_for_role(args.role)
     plans: list[dict[str, object]] = []
     commands: list[list[str]] = []
     for index, choice in enumerate(choices, start=1):
@@ -261,6 +270,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             workspace=workspace,
             packet=prompt,
             title=title,
+            agent=opencode_agent,
             provider_id=args.provider_id,
             auto=args.auto,
         )
@@ -270,6 +280,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                 "seat": index,
                 "model": choice.model,
                 "vendor": vendor,
+                "agent": opencode_agent,
                 "score": list(choice.score),
                 "probe": choice.is_real_task_probe,
             }
