@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from cortex_v5.litellm import (
+    DEFAULT_STREAM_READ_TIMEOUT_SECONDS,
     LiteLLMClient,
     LiteLLMStreamError,
     normalize_models,
@@ -80,6 +81,14 @@ async def test_done_is_valid_and_bare_connection_close_is_protocol_error():
 
 
 @pytest.mark.asyncio
+async def test_sse_keepalive_comments_do_not_terminate_or_corrupt_stream():
+    event = json.dumps({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    result = await parse_sse(lines(": ping", "", ": another-ping", f"data: {event}", ""))
+    assert result.content == "ok"
+    assert result.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
 async def test_partial_event_then_connection_close_is_protocol_error():
     partial = json.dumps({"choices": [{"delta": {"content": "unfinished"}}]})
     with pytest.raises(LiteLLMStreamError, match="finish_reason"):
@@ -118,6 +127,25 @@ async def test_null_finish_reason_is_nonterminal_until_done():
     assert result.content == "ok"
     assert result.finish_reason is None
     assert result.termination == "done"
+
+
+@pytest.mark.asyncio
+async def test_default_owned_client_uses_600_second_stream_read_window():
+    client = LiteLLMClient("https://example.invalid")
+    try:
+        assert DEFAULT_STREAM_READ_TIMEOUT_SECONDS == 600.0
+        assert client.stream_read_timeout_seconds == 600.0
+        assert client._client.timeout.read == 600.0
+        assert client._client.timeout.connect == 30.0
+        assert client._client.timeout.write == 30.0
+        assert client._client.timeout.pool == 30.0
+    finally:
+        await client.aclose()
+
+
+def test_rejects_nonpositive_timeout():
+    with pytest.raises(ValueError, match="timeout must be positive"):
+        LiteLLMClient("https://example.invalid", timeout=0)
 
 
 @pytest.mark.asyncio
