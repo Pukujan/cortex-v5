@@ -37,7 +37,10 @@ class Settings:
     max_attempts: int = 24
     max_tool_rounds: int = 20
     default_max_tokens: int = 4096
-    model_inactivity_seconds: int = 300
+    # Maximum interval without streamed network data before V5 aborts the model
+    # transport.  This is not a total task wall-clock timeout.  The 600 second
+    # default matches the preferred ckff route's operator-published network window.
+    model_inactivity_seconds: int = 600
 
     @classmethod
     def from_env(
@@ -91,7 +94,7 @@ class Settings:
             max_tool_rounds=max(1, _integer(values, "CORTEX_V5_MAX_TOOL_ROUNDS", 20)),
             default_max_tokens=max(1, _integer(values, "CORTEX_V5_DEFAULT_MAX_TOKENS", 4096)),
             model_inactivity_seconds=max(
-                1, _integer(values, "CORTEX_V5_MODEL_INACTIVITY_SECONDS", 300)
+                1, _integer(values, "CORTEX_V5_MODEL_INACTIVITY_SECONDS", 600)
             ),
         )
 
