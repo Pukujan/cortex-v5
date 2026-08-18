@@ -4,6 +4,7 @@ import pytest
 
 from cortex_v5.contracts import ModelChoice
 from cortex_v5.opencode_dispatch import (
+    agent_for_role,
     build_opencode_command,
     canonical_model,
     choose_cross_vendor,
@@ -20,6 +21,14 @@ def test_catalog_prefix_aliases_keep_vendor_identity():
     assert vendor_for("[grok] grok-4.6") == "xai"
     assert vendor_for("gpt-5.6-sol") == "openai"
     assert vendor_for("unknown-model") is None
+
+
+def test_roles_bind_mutation_to_build_and_analysis_to_plan():
+    assert agent_for_role("worker") == "build"
+    assert agent_for_role("test-writer") == "build"
+    assert agent_for_role("reviewer") == "plan"
+    assert agent_for_role("researcher") == "plan"
+    assert agent_for_role("evaluator") == "plan"
 
 
 def test_cross_vendor_selection_skips_duplicates_unknown_and_ineligible():
@@ -44,15 +53,19 @@ def test_cross_vendor_selection_fails_closed_when_floor_is_unavailable():
         choose_cross_vendor((choice("grok-4.6"),), count=2, now=0.0)
 
 
-def test_opencode_command_binds_model_workspace_and_packet_without_credentials(tmp_path: Path):
+def test_opencode_command_binds_agent_model_workspace_and_packet_without_credentials(
+    tmp_path: Path,
+):
     command = build_opencode_command(
         model="grok-4.6",
         workspace=tmp_path,
         packet="bounded packet",
         title="cortex-test",
+        agent="build",
     )
     assert command[:3] == ["opencode", "--pure", "run"]
     assert ["--model", "ckff/grok-4.6"] == command[3:5]
+    assert ["--agent", "build"] == command[5:7]
     assert str(tmp_path) in command
     assert command[-1] == "bounded packet"
     assert all("secret" not in part.lower() for part in command)
@@ -64,12 +77,14 @@ def test_auto_flag_is_explicit_not_default(tmp_path: Path):
         workspace=tmp_path,
         packet="packet",
         title="normal",
+        agent="build",
     )
     automatic = build_opencode_command(
         model="grok-4.6",
         workspace=tmp_path,
         packet="packet",
         title="auto",
+        agent="build",
         auto=True,
     )
     assert "--auto" not in normal
