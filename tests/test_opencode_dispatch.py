@@ -92,9 +92,13 @@ def test_auto_flag_is_explicit_not_default(tmp_path: Path):
     assert "--auto" in automatic
 
 
-def test_example_config_keeps_wildcard_before_specific_denies_and_plan_read_only():
+def test_example_config_pins_route_timeout_and_hardens_read_only_plan():
     root = Path(__file__).resolve().parents[1]
     config = json.loads((root / "opencode.example.json").read_text(encoding="utf-8"))
+
+    provider = config["provider"]["ckff"]
+    assert provider["options"]["timeout"] == 600_000
+    assert provider["options"]["chunkTimeout"] == 600_000
 
     bash_rules = config["permission"]["bash"]
     assert next(iter(bash_rules)) == "*"
