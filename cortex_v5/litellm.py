@@ -1,16 +1,42 @@
-"""Strict LiteLLM transport using the OpenAI-compatible streaming API."""
+"""Strict LiteLLM transport using the OpenAI-compatible streaming API.
+
+Operational timeout contract
+----------------------------
+V5 always requests streaming completions.  The HTTPX timeout configured here is a
+*network inactivity/read* timeout, not a task wall-clock budget and not a model
+quality signal.
+
+The currently qualified ckff routes are:
+
+- ``https://ckffai.com/v1`` — preferred Tencent node; ckff reports a 600 second
+  network timeout.
+- ``https://aws.ckffai.com/v1`` — backup AWS node; ckff reports a 180 second
+  network timeout and explicitly warns that non-streaming requests exceeding that
+  window fail.
+
+The client default is therefore 600 seconds rather than the historical 120 second
+value.  Long model work must still use ``stream=True`` (enforced below) and should
+be pre-granulated so one model turn finishes comfortably inside the selected
+route's provider ceiling.  A transport timeout must be classified as infrastructure
+or route evidence; it must not automatically be interpreted as model incapability.
+
+For the temporary cross-vendor coding-agent execution path while the V5 runtime is
+being stabilized, see ``docs/CROSS-VENDOR-OPENCODE.md``.
+"""
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
 from .contracts import StreamCompletion, ToolCall
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+DEFAULT_STREAM_READ_TIMEOUT_SECONDS: Final[float] = 600.0
+_SHORT_IO_TIMEOUT_SECONDS: Final[float] = 30.0
 CHAT_COMPLETION_FINISH_REASONS = frozenset(
     {"stop", "length", "tool_calls", "content_filter", "function_call"}
 )
@@ -125,7 +151,8 @@ async def parse_sse(
             data_lines.clear()
         elif line.startswith("data:"):
             data_lines.append(line[5:].lstrip(" "))
-        # SSE comments, event names, ids, and retry fields are deliberately ignored.
+        # SSE comments (including keepalive pings), event names, ids, and retry
+        # fields are deliberately ignored.
     else:
         if data_lines:
             await consume("\n".join(data_lines))
@@ -182,15 +209,24 @@ class LiteLLMClient:
         base_url: str,
         *,
         api_key: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_STREAM_READ_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
         event_callback: EventCallback | None = None,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
         self.base_url = base_url.rstrip("/")
         self.event_callback = event_callback
+        self.stream_read_timeout_seconds = float(timeout)
         self._owned = client is None
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self._client = client or httpx.AsyncClient(headers=headers, timeout=timeout)
+        transport_timeout = httpx.Timeout(
+            timeout,
+            connect=min(timeout, _SHORT_IO_TIMEOUT_SECONDS),
+            write=min(timeout, _SHORT_IO_TIMEOUT_SECONDS),
+            pool=min(timeout, _SHORT_IO_TIMEOUT_SECONDS),
+        )
+        self._client = client or httpx.AsyncClient(headers=headers, timeout=transport_timeout)
 
     def _endpoint(self, path: str) -> str:
         prefix = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
