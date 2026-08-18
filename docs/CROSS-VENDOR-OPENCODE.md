@@ -15,29 +15,34 @@ Use the existing systems for the job they already own:
 
 Do not make OpenCode session state authoritative Cortex state. Do not make FOSSIL active task state. Do not let LiteLLM fallback silently change a cross-vendor evaluation seat.
 
-## 2. ckff route timeout contract
+## 2. Timeout contract: provider, V5 client, and OpenCode are separate clocks
 
-Operator-verified ckff dashboard text on 2026-08-18 records:
+Operator-visible ckff dashboard text captured on 2026-08-18 records:
 
 | Route | Use | Network timeout | Rule |
 |---|---|---:|---|
 | `https://ckffai.com/v1` | primary / Tencent node | 600 s | preferred for stability |
 | `https://aws.ckffai.com/v1` | backup / AWS node | 180 s | non-stream requests exceeding 180 s can fail; prefer streaming or primary route |
 
-Cortex V5 therefore uses a 600 second streaming HTTP read/inactivity window by default in `cortex_v5/litellm.py`. This is not permission to create ten-minute monolithic tasks. Provider/network ceilings still exist and reasoning/tool-call variance requires safety margin.
+Cortex V5's direct streaming client now uses a **600 second HTTP read/inactivity window** by default in `cortex_v5/litellm.py`. This replaces the historical 120 second default that could abort a quiet long-running stream before the preferred ckff route did.
+
+OpenCode is a different clock. Current OpenCode configuration documents a provider-request `timeout` default of **300000 ms** plus a separate streamed `chunkTimeout`. `opencode.example.json` explicitly sets both to **600000 ms** for the preferred ckff route. However, an upstream OpenCode issue reports that some versions ignored a configured timeout above 300s and still failed at about 303s. Therefore the installed OpenCode version must be qualified before assuming one provider turn can actually use the full 600s.
 
 ### Task-size rule
 
-- Primary 600 s route: granulate model turns to an expected **300–450 s maximum**, preferably less.
-- Backup 180 s route: granulate model turns to an expected **60–120 s maximum**.
+- **Direct V5 streaming client on the 600 s route:** target individual model work well below the route ceiling, roughly **300–450 s maximum expected time**.
+- **OpenCode on the 600 s route, until the installed version proves >300 s provider turns:** target each model turn at **<=240 s**. The OpenCode session may continue across multiple bounded turns/tool calls.
+- **AWS 180 s backup route:** target each model turn at **60–120 s**.
 - If a task times out on a shared route, **do not switch vendors and replay the same oversized packet**. Split the packet or move to the longer qualified route.
-- Treat route/client timeout as infrastructure evidence. Do not automatically penalize model capability or seating quality for a shared transport ceiling.
+- Treat route/client/OpenCode timeout as infrastructure evidence. Do not automatically penalize model capability or seating quality for a shared transport ceiling.
+
+Streaming prevents idle/non-stream failure modes; it does not make an absolute provider or client request ceiling disappear.
 
 ## 3. OpenCode provider configuration
 
 OpenCode supports custom OpenAI-compatible providers. `opencode.example.json` defines one `ckff` provider with the current five qualified cross-vendor seats.
 
-The example uses the same persisted environment variable names as V5's `.env.example`:
+The example uses the same persisted environment variable names as V5's `.env.example` and pins the OpenCode request/chunk timeout to 600000 ms:
 
 ```json
 {
@@ -48,7 +53,9 @@ The example uses the same persisted environment variable names as V5's `.env.exa
       "name": "ckff / Cortex cross-vendor seats",
       "options": {
         "baseURL": "{env:LITELLM_URL}",
-        "apiKey": "{env:LITELLM_MASTER_KEY}"
+        "apiKey": "{env:LITELLM_MASTER_KEY}",
+        "timeout": 600000,
+        "chunkTimeout": 600000
       }
     }
   }
@@ -57,7 +64,24 @@ The example uses the same persisted environment variable names as V5's `.env.exa
 
 OpenCode substitutes process environment variables; it does not get V5's Python-side `.env` parsing for free. The dispatcher below loads V5's local settings and injects those two values into the OpenCode subprocess without putting credentials on the command line or in its receipt.
 
-`opencode.example.json` deliberately asks before arbitrary shell commands and denies external-directory access, `git push`, `git commit`, `git reset --hard`, and `sudo`. A non-interactive run will not magically approve an `ask` permission. For a task that must run tests, either pre-allow the exact required test commands or use `--auto` **only inside an already-isolated/throwaway authorized workspace** where the explicit deny rules are adequate for the task. Do not weaken the permission boundary just to avoid an approval failure.
+The checked-in OpenCode policy deliberately:
+
+- denies external-directory access;
+- disables recursive `task` subagent fan-out for this path;
+- disables the `question` and doom-loop recovery tools so an already-granulated noninteractive packet stops instead of recursively widening itself;
+- puts the wildcard bash `ask` rule **before** specific git/sudo denies because OpenCode uses last-match-wins permission ordering;
+- makes the Plan agent explicitly read/web-only and denies arbitrary bash/edit access, so `--auto` cannot turn a reviewer/researcher/evaluator into a mutation seat.
+
+For mutating Build work, `--auto` remains opt-in. Use it only with an already bounded/isolated workspace and the explicit deny rules in the OpenCode config.
+
+Before trusting >300 s OpenCode turns on a machine, record the installed version and inspect the merged config:
+
+```bash
+opencode --version
+opencode debug config
+```
+
+Then run a deliberate qualification probe if using the extra 300–600 s window materially matters. Until that probe passes, keep OpenCode provider turns under the conservative <=240 s target even though the ckff primary route itself allows 600 s.
 
 ## 4. Policy-driven dispatcher
 
@@ -81,8 +105,6 @@ python -m cortex_v5.opencode_dispatch task-packet.md \
   --auto
 ```
 
-`--auto` is opt-in. Use it only with an already bounded/isolated workspace and the explicit deny rules in the OpenCode config.
-
 For independent read-only cross-vendor critique/evaluation, request multiple seats:
 
 ```bash
@@ -100,7 +122,7 @@ The role mapping is deliberate:
 
 The dispatcher refuses `--seats > 1` for mutating roles because multiple workers must not share one mutable workspace. Give each mutating seat its own isolated worktree/workspace instead.
 
-The dispatcher runs OpenCode in the foreground with no outer Cortex wall-clock timeout. OpenCode may therefore perform multiple provider-bounded model turns and tool operations while every individual ckff request still stays inside the provider route ceiling. A successful OpenCode process is execution evidence, not Cortex completion.
+The dispatcher runs OpenCode in the foreground with no outer Cortex wall-clock timeout. OpenCode may therefore perform multiple provider-bounded model turns and tool operations while each individual provider call remains bounded by the effective OpenCode/provider envelope. A successful OpenCode process is execution evidence, not Cortex completion.
 
 For repeated manually managed packets, OpenCode may also be run with a persistent server to avoid repeated startup/tool initialization:
 
@@ -206,6 +228,7 @@ Record at least these classes separately:
 - `model_output_failure` — model completed the request but produced incorrect/insufficient work;
 - `provider_route_timeout` — ckff/upstream route exceeded its network/request envelope;
 - `client_read_timeout` — local HTTP transport saw no stream data inside its read window;
+- `opencode_request_timeout` — OpenCode aborted an individual provider turn before the upstream route completed;
 - `stream_protocol_failure` — malformed/truncated SSE or invalid terminal semantics;
 - `tool_execution_timeout` — a local tool/subprocess exceeded its own budget;
 - `verification_timeout` — checker/test execution exceeded its budget.
@@ -216,7 +239,8 @@ Only `model_output_failure` should directly count as evidence of model capabilit
 
 - OpenCode provider configuration: https://opencode.ai/docs/providers
 - OpenCode CLI `run` / `--model` / `--agent` / `--attach`: https://dev.opencode.ai/docs/cli/
-- OpenCode config environment substitution: https://dev.opencode.ai/docs/config
+- OpenCode configuration and provider timeout options: https://dev.opencode.ai/docs/config
 - OpenCode agents: https://opencode.ai/docs/agents
 - OpenCode permissions: https://opencode.ai/docs/permissions
+- Known upstream OpenCode timeout-config issue: https://github.com/anomalyco/opencode/issues/30252
 - V5 seating evidence and tier provenance: `docs/MODEL-SEATING-RESEARCH-2026-08.md`
