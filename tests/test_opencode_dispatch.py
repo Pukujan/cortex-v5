@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -89,3 +90,24 @@ def test_auto_flag_is_explicit_not_default(tmp_path: Path):
     )
     assert "--auto" not in normal
     assert "--auto" in automatic
+
+
+def test_example_config_keeps_wildcard_before_specific_denies_and_plan_read_only():
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads((root / "opencode.example.json").read_text(encoding="utf-8"))
+
+    bash_rules = config["permission"]["bash"]
+    assert next(iter(bash_rules)) == "*"
+    assert bash_rules["git push*"] == "deny"
+    assert bash_rules["git commit*"] == "deny"
+    assert config["permission"]["task"] == "deny"
+    assert config["permission"]["doom_loop"] == "deny"
+
+    plan = config["agent"]["plan"]["permission"]
+    assert plan["edit"] == "deny"
+    assert plan["task"] == "deny"
+    assert plan["external_directory"] == "deny"
+    assert plan["webfetch"] == "allow"
+    assert plan["websearch"] == "allow"
+    assert next(iter(plan["bash"])) == "*"
+    assert plan["bash"]["*"] == "deny"
