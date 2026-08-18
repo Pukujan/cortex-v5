@@ -35,7 +35,7 @@ Cortex V5 therefore uses a 600 second streaming HTTP read/inactivity window by d
 
 ## 3. OpenCode provider configuration
 
-OpenCode supports custom OpenAI-compatible providers. Start from `opencode.example.json`, copy it to `opencode.json`, and point the `ckff` provider at the same LiteLLM-compatible endpoint used by Cortex.
+OpenCode supports custom OpenAI-compatible providers. `opencode.example.json` defines one `ckff` provider with the current five qualified cross-vendor seats.
 
 The example uses the same persisted environment variable names as V5's `.env.example`:
 
@@ -55,22 +55,54 @@ The example uses the same persisted environment variable names as V5's `.env.exa
 }
 ```
 
-OpenCode substitutes process environment variables; it does not get V5's Python-side `.env` parsing for free. Export the local `.env` values into the process environment before invoking OpenCode, or use OpenCode's credential store. Keep credentials outside committed files.
-
-The model passed to OpenCode is `ckff/<catalog-model-id>`, for example:
-
-```bash
-opencode run \
-  --model ckff/grok-4.6 \
-  --dir "$WORKSPACE" \
-  --format json \
-  --title "cortex-granule-W17-G3" \
-  "$(cat task-packet.md)"
-```
+OpenCode substitutes process environment variables; it does not get V5's Python-side `.env` parsing for free. The dispatcher below loads V5's local settings and injects those two values into the OpenCode subprocess without putting credentials on the command line or in its receipt.
 
 `opencode.example.json` deliberately asks before arbitrary shell commands and denies external-directory access, `git push`, `git commit`, `git reset --hard`, and `sudo`. A non-interactive run will not magically approve an `ask` permission. For a task that must run tests, either pre-allow the exact required test commands or use `--auto` **only inside an already-isolated/throwaway authorized workspace** where the explicit deny rules are adequate for the task. Do not weaken the permission boundary just to avoid an approval failure.
 
-For repeated packets, a persistent OpenCode server may be used to avoid repeated startup/tool initialization:
+## 4. Policy-driven dispatcher
+
+Use the checked-in dispatcher rather than manually choosing a model when the task should follow V5 methodology/seating policy:
+
+```bash
+python -m cortex_v5.opencode_dispatch task-packet.md \
+  --workspace "$WORKSPACE" \
+  --acceptance "pytest -q" \
+  --role worker \
+  --dry-run
+```
+
+The dry run resolves V5 methodology, refreshes the live LiteLLM model catalog, applies `SeatingManager`, chooses the highest eligible qualified seat, and prints a credential-free execution plan. Remove `--dry-run` to execute it in the foreground:
+
+```bash
+python -m cortex_v5.opencode_dispatch task-packet.md \
+  --workspace "$WORKSPACE" \
+  --acceptance "pytest -q" \
+  --role worker \
+  --auto
+```
+
+`--auto` is opt-in. Use it only with an already bounded/isolated workspace and the explicit deny rules in the OpenCode config.
+
+For independent read-only cross-vendor critique/evaluation, request multiple seats:
+
+```bash
+python -m cortex_v5.opencode_dispatch review-packet.md \
+  --workspace "$WORKSPACE" \
+  --acceptance "produce an evidence-backed critique" \
+  --role reviewer \
+  --seats 3
+```
+
+The role mapping is deliberate:
+
+- `worker` and `test-writer` -> OpenCode **Build** agent;
+- `reviewer`, `researcher`, and `evaluator` -> OpenCode **Plan** agent.
+
+The dispatcher refuses `--seats > 1` for mutating roles because multiple workers must not share one mutable workspace. Give each mutating seat its own isolated worktree/workspace instead.
+
+The dispatcher runs OpenCode in the foreground with no outer Cortex wall-clock timeout. OpenCode may therefore perform multiple provider-bounded model turns and tool operations while every individual ckff request still stays inside the provider route ceiling. A successful OpenCode process is execution evidence, not Cortex completion.
+
+For repeated manually managed packets, OpenCode may also be run with a persistent server to avoid repeated startup/tool initialization:
 
 ```bash
 opencode serve
@@ -79,9 +111,9 @@ opencode run --attach http://localhost:4096 --model ckff/grok-4.6 --dir "$WORKSP
 
 Do not use `--continue` merely to make a task larger. Continue a session only when the next granule is explicitly bound to the same authorized work generation and the previous granule produced a valid checkpoint.
 
-## 4. Seat selection procedure
+## 5. Seat selection procedure
 
-Before invoking OpenCode:
+The dispatcher mechanically applies this sequence:
 
 1. Run `MethodologyEngine.decide(...)` on the requested work.
 2. If the decision is ambiguous, stop for human resolution; OpenCode does not resolve authority ambiguity.
@@ -89,7 +121,7 @@ Before invoking OpenCode:
 4. Rank candidates with `SeatingManager.rank(...)` using the decision's `task_type`, `risk`, and `routing_tags`.
 5. Select the highest eligible seat from the research-grounded tier list.
 6. When the task requires independent cross-vendor work, select additional seats from **different vendors** rather than same-vendor model variants.
-7. Bind every invocation to the exact task/work generation and record the selected model and route as execution evidence.
+7. Bind the packet by SHA-256 and record the selected model, vendor, role/agent, methodology, route, workspace, and return code in a local dispatch receipt.
 
 The current top-five cross-vendor prior from `MODEL_TIERS` is:
 
@@ -101,7 +133,7 @@ The current top-five cross-vendor prior from `MODEL_TIERS` is:
 
 Availability, methodology relevance, observed success/failure, and explicit route health still outrank blindly following a static list.
 
-## 5. Granulated task packet
+## 6. Granulated task packet
 
 OpenCode should not receive an unbounded instruction such as “implement the whole issue.” Create one packet whose completion is independently observable.
 
@@ -110,7 +142,7 @@ Required fields:
 ```text
 TASK ID / WORK UNIT / GENERATION
 ROLE: worker | test-writer | reviewer | researcher | evaluator
-MODEL SEAT: chosen Cortex seat
+MODEL SEAT: chosen Cortex seat (filled by dispatcher when policy-selected)
 OBJECTIVE: one bounded outcome
 AUTHORITATIVE INPUTS: exact requirement/version, current repo refs
 FOSSIL CONTEXT: only relevant claims with provenance; current repo wins conflicts
@@ -125,7 +157,7 @@ HANDOFF: facts required by the next granule; no prose-only completion claim
 
 A good granule usually changes or answers one thing and has one obvious verification boundary.
 
-## 6. Which work goes through OpenCode while V5 is unstable?
+## 7. Which work goes through OpenCode while V5 is unstable?
 
 Use OpenCode for work that benefits from a repository-aware frontier coding agent:
 
@@ -167,7 +199,7 @@ workspace change / research artifact / critique
 project tests + independent verification + CI
 ```
 
-## 7. Timeout/failure classification
+## 8. Timeout/failure classification
 
 Record at least these classes separately:
 
@@ -180,10 +212,11 @@ Record at least these classes separately:
 
 Only `model_output_failure` should directly count as evidence of model capability failure. Shared transport failures should drive route health/backoff and packet granulation decisions instead.
 
-## 8. References
+## 9. References
 
 - OpenCode provider configuration: https://opencode.ai/docs/providers
-- OpenCode CLI `run` / `--model` / `--attach`: https://dev.opencode.ai/docs/cli/
+- OpenCode CLI `run` / `--model` / `--agent` / `--attach`: https://dev.opencode.ai/docs/cli/
 - OpenCode config environment substitution: https://dev.opencode.ai/docs/config
+- OpenCode agents: https://opencode.ai/docs/agents
 - OpenCode permissions: https://opencode.ai/docs/permissions
 - V5 seating evidence and tier provenance: `docs/MODEL-SEATING-RESEARCH-2026-08.md`
