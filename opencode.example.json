@@ -7,7 +7,9 @@
       "name": "ckff / Cortex cross-vendor seats",
       "options": {
         "baseURL": "{env:LITELLM_URL}",
-        "apiKey": "{env:LITELLM_MASTER_KEY}"
+        "apiKey": "{env:LITELLM_MASTER_KEY}",
+        "timeout": 600000,
+        "chunkTimeout": 600000
       },
       "models": {
         "grok-4.6": {"name": "grok-4.6"},
