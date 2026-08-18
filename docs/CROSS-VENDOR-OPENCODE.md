@@ -37,7 +37,7 @@ Cortex V5 therefore uses a 600 second streaming HTTP read/inactivity window by d
 
 OpenCode supports custom OpenAI-compatible providers. Start from `opencode.example.json`, copy it to `opencode.json`, and point the `ckff` provider at the same LiteLLM-compatible endpoint used by Cortex.
 
-The example uses environment substitution rather than committed credentials:
+The example uses the same persisted environment variable names as V5's `.env.example`:
 
 ```json
 {
@@ -47,15 +47,15 @@ The example uses environment substitution rather than committed credentials:
       "npm": "@ai-sdk/openai-compatible",
       "name": "ckff / Cortex cross-vendor seats",
       "options": {
-        "baseURL": "{env:CORTEX_V5_LITELLM_URL}",
-        "apiKey": "{env:CORTEX_V5_LITELLM_API_KEY}"
+        "baseURL": "{env:LITELLM_URL}",
+        "apiKey": "{env:LITELLM_MASTER_KEY}"
       }
     }
   }
 }
 ```
 
-Keep credentials outside committed files. Export the V5-local values before invoking OpenCode, or use OpenCode's credential store.
+OpenCode substitutes process environment variables; it does not get V5's Python-side `.env` parsing for free. Export the local `.env` values into the process environment before invoking OpenCode, or use OpenCode's credential store. Keep credentials outside committed files.
 
 The model passed to OpenCode is `ckff/<catalog-model-id>`, for example:
 
