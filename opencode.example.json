@@ -5,8 +5,8 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "ckff / Cortex cross-vendor seats",
       "options": {
-        "baseURL": "{env:CORTEX_V5_LITELLM_URL}",
-        "apiKey": "{env:CORTEX_V5_LITELLM_API_KEY}"
+        "baseURL": "{env:LITELLM_URL}",
+        "apiKey": "{env:LITELLM_MASTER_KEY}"
       },
       "models": {
         "grok-4.6": {"name": "grok-4.6"},
