@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ckff": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ckff / Cortex cross-vendor seats",
+      "options": {
+        "baseURL": "{env:CORTEX_V5_LITELLM_URL}",
+        "apiKey": "{env:CORTEX_V5_LITELLM_API_KEY}"
+      },
+      "models": {
+        "grok-4.6": {"name": "grok-4.6"},
+        "gpt-5.6-sol": {"name": "gpt-5.6-sol"},
+        "kimi-k3": {"name": "kimi-k3"},
+        "qwen3.8-max": {"name": "qwen3.8-max"},
+        "gemini-3.6-flash": {"name": "gemini-3.6-flash"}
+      }
+    }
+  },
+  "permission": {
+    "external_directory": "deny",
+    "bash": {
+      "git push *": "deny",
+      "git commit *": "deny",
+      "git reset --hard *": "deny",
+      "sudo *": "deny",
+      "*": "ask"
+    }
+  }
+}
