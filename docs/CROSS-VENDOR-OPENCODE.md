@@ -35,9 +35,9 @@ Cortex V5 therefore uses a 600 second streaming HTTP read/inactivity window by d
 
 ## 3. OpenCode provider configuration
 
-OpenCode supports custom OpenAI-compatible providers. Configure one provider ID, `ckff`, and point it at the same LiteLLM-compatible endpoint used by Cortex.
+OpenCode supports custom OpenAI-compatible providers. Start from `opencode.example.json`, copy it to `opencode.json`, and point the `ckff` provider at the same LiteLLM-compatible endpoint used by Cortex.
 
-Example `opencode.json`:
+The example uses environment substitution rather than committed credentials:
 
 ```json
 {
@@ -49,13 +49,6 @@ Example `opencode.json`:
       "options": {
         "baseURL": "{env:CORTEX_V5_LITELLM_URL}",
         "apiKey": "{env:CORTEX_V5_LITELLM_API_KEY}"
-      },
-      "models": {
-        "grok-4.6": {"name": "grok-4.6"},
-        "gpt-5.6-sol": {"name": "gpt-5.6-sol"},
-        "kimi-k3": {"name": "kimi-k3"},
-        "qwen3.8-max": {"name": "qwen3.8-max"},
-        "gemini-3.6-flash": {"name": "gemini-3.6-flash"}
       }
     }
   }
@@ -74,6 +67,8 @@ opencode run \
   --title "cortex-granule-W17-G3" \
   "$(cat task-packet.md)"
 ```
+
+`opencode.example.json` deliberately asks before arbitrary shell commands and denies external-directory access, `git push`, `git commit`, `git reset --hard`, and `sudo`. A non-interactive run will not magically approve an `ask` permission. For a task that must run tests, either pre-allow the exact required test commands or use `--auto` **only inside an already-isolated/throwaway authorized workspace** where the explicit deny rules are adequate for the task. Do not weaken the permission boundary just to avoid an approval failure.
 
 For repeated packets, a persistent OpenCode server may be used to avoid repeated startup/tool initialization:
 
