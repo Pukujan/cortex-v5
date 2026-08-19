@@ -35,6 +35,34 @@ Every retry or model switch is a distinct V5 attempt with a distinct receipt. Th
 task after five minutes of model inactivity acts as that model's probe; V5 never makes synthetic
 health calls. Exhausted candidates leave the task waiting instead of creating a tight loop.
 
+## Secretless disposable WorkOrders
+
+The GitHub Actions WorkOrder harness is a replaceable execution/control surface around V5; it is
+not a second orchestrator and it is not durable truth. `cortex_v5.workorders` validates one
+explicit `cortex.workorder.v1` envelope containing the repository, exact base commit, objective,
+acceptance, risk, deadline, idempotency/correlation data, generation, and bounded parallelism.
+Secret-bearing fields are rejected at this boundary.
+
+The Actions portfolio is split into reusable `workorder-preflight`, `workorder-fanout`,
+`workorder-attempt`, `workorder-fanin`, and `runner-death-chaos` workflows. Fan-out is flat and
+bounded; each attempt gets a deterministic generation-fenced identity and its own patch
+destination. Fan-in requires a terminal receipt for every current-generation attempt and derives
+PASS only from mechanical verification. A model-authored “done” field has no completion
+authority.
+
+The current secretless `workorder-attempt` is deliberately a fixture executor: it runs the fixed
+WorkOrder contract tests, emits a structured receipt/checkpoint, uploads that disposable
+transport, and only then fails if verification failed. It does not execute arbitrary commands
+from the WorkOrder and it does not call a model. Real model-backed attempts remain a later,
+credentialed campaign once this control plane is trusted.
+
+`runner-death-chaos` persists a checkpoint, deliberately terminates that hosted job, then resumes
+on a different hosted runner by advancing the generation. The successor attempt is fenced from
+the stale generation and skips already completed stages. Ordinary Actions artifacts are used
+only to transport receipts/checkpoints between disposable jobs; project truth remains in GitHub
+code/project records and semantically durable evidence belongs in Fossil when reviewed and
+appropriate.
+
 ## Local setup
 
 ```powershell
