@@ -1,0 +1,84 @@
+name: workorder-preflight
+
+on:
+  workflow_call:
+    inputs:
+      work_order_json:
+        required: true
+        type: string
+    outputs:
+      work_order:
+        value: ${{ jobs.preflight.outputs.work_order }}
+      max_parallel:
+        value: ${{ jobs.preflight.outputs.max_parallel }}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      work_order: ${{ steps.emit.outputs.work_order }}
+      max_parallel: ${{ steps.emit.outputs.max_parallel }}
+    env:
+      CORTEX_SOFTWARE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      WORK_ORDER_JSON: ${{ inputs.work_order_json }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Cortex V5
+        run: python -m pip install -e '.[test]'
+      - name: Materialize WorkOrder
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path("build/workorder").mkdir(parents=True, exist_ok=True)
+          value = json.loads(os.environ["WORK_ORDER_JSON"])
+          Path("build/workorder/input.json").write_text(
+              json.dumps(value, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Validate WorkOrder preflight
+        run: |
+          python -m cortex_v5.workorders preflight \
+            build/workorder/input.json \
+            --output build/workorder/validated.json
+      - name: Bind repo and exact base SHA to checkout
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          order = json.load(open("build/workorder/validated.json", encoding="utf-8"))
+          if order["repo"] != os.environ["GITHUB_REPOSITORY"]:
+              raise SystemExit("WorkOrder repo does not match workflow repository")
+          if order["base_sha"] != os.environ["CORTEX_SOFTWARE_COMMIT"]:
+              raise SystemExit("WorkOrder base_sha does not match exact workflow checkout")
+          PY
+      - name: Emit validated outputs
+        id: emit
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          order = json.load(open("build/workorder/validated.json", encoding="utf-8"))
+          compact = json.dumps(order, sort_keys=True, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"work_order={compact}\n")
+              output.write(f"max_parallel={order['max_parallel']}\n")
+          PY
