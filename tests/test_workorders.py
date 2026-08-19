@@ -8,8 +8,10 @@ from cortex_v5.workorders import (
     ReceiptValidationError,
     WorkOrderValidationError,
     advance_after_runner_loss,
+    build_fixture_attempt_receipt,
     fanin,
     fanout,
+    validate_attempt,
     validate_work_order,
 )
 
@@ -106,6 +108,36 @@ def test_fanout_is_flat_deterministic_and_isolates_patch_destinations() -> None:
     assert all(attempt["deadline"] == order["deadline"] for attempt in first)
     assert all(attempt["destination"].endswith(".patch") for attempt in first)
     assert all("children" not in attempt for attempt in first)
+
+
+def test_attempt_payload_is_exactly_bound_to_deterministic_fanout() -> None:
+    order = _work_order(attempt_count=1)
+    attempt = fanout(order)[0]
+
+    assert validate_attempt(order, attempt) == attempt
+
+    tampered = copy.deepcopy(attempt)
+    tampered["destination"] = "patches/attacker-controlled.patch"
+    with pytest.raises(ReceiptValidationError, match="deterministic fanout"):
+        validate_attempt(order, tampered)
+
+
+def test_fixture_receipt_is_bound_and_non_authoritative_model_metadata() -> None:
+    order = _work_order(attempt_count=1)
+    attempt = fanout(order)[0]
+
+    receipt = build_fixture_attempt_receipt(
+        order,
+        attempt,
+        passed=True,
+        started_at="2026-08-19T21:00:00Z",
+        finished_at="2026-08-19T21:00:01Z",
+    )
+
+    assert receipt["attempt_id"] == attempt["attempt_id"]
+    assert receipt["destination"] == attempt["destination"]
+    assert receipt["verification"]["passed"] is True
+    assert receipt["model_reported_done"] is False
 
 
 def test_fanin_uses_mechanical_verification_not_model_authored_done() -> None:
