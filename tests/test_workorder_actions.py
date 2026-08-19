@@ -63,3 +63,19 @@ def test_runner_death_chaos_is_deterministic_and_secretless() -> None:
     assert "workflow_dispatch:" in text
     assert "test_runner_death_recovery_advances_generation_and_fences_old_receipts" in text
     assert "test_runner_death_recovery_rejects_completed_or_unbound_checkpoint" in text
+
+
+def test_secretless_harness_composes_preflight_matrix_attempts_fanin_and_recovery() -> None:
+    text = _workflow("workorder-harness.yml")
+
+    assert "uses: ./.github/workflows/workorder-preflight.yml" in text
+    assert "uses: ./.github/workflows/workorder-fanout.yml" in text
+    assert "uses: ./.github/workflows/workorder-attempt.yml" in text
+    assert "uses: ./.github/workflows/workorder-fanin.yml" in text
+    assert "uses: ./.github/workflows/runner-death-chaos.yml" in text
+    assert "max-parallel: ${{ fromJSON(needs.fanout.outputs.max_parallel) }}" in text
+    assert "matrix: ${{ fromJSON(needs.fanout.outputs.matrix) }}" in text
+    assert "attempt_json: ${{ toJSON(matrix) }}" in text
+    assert "model_authored_done_is_authority" in text
+    assert "pull_request_target" not in text
+    assert "${{ secrets." not in text
