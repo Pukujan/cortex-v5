@@ -52,6 +52,10 @@ def _parse_timestamp(value: Any, field: str, error_type: type[ValueError]) -> da
     return parsed.astimezone(UTC)
 
 
+def _now_rfc3339() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _require_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WorkOrderValidationError(f"{field} must be a non-empty string")
@@ -256,6 +260,25 @@ def fanout(values: Mapping[str, Any]) -> list[dict[str, Any]]:
     return attempts
 
 
+def validate_attempt(
+    work_order: Mapping[str, Any], attempt: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind an attempt payload to the exact deterministic WorkOrder fan-out."""
+
+    order = validate_work_order(work_order)
+    if not isinstance(attempt, Mapping):
+        raise ReceiptValidationError("attempt must be an object")
+    candidate = copy.deepcopy(dict(attempt))
+    expected_by_id = {item["attempt_id"]: item for item in fanout(order)}
+    attempt_id = candidate.get("attempt_id")
+    if not isinstance(attempt_id, str) or attempt_id not in expected_by_id:
+        raise ReceiptValidationError("attempt_id is not bound to this WorkOrder generation")
+    expected = expected_by_id[attempt_id]
+    if candidate != expected:
+        raise ReceiptValidationError("attempt payload does not match deterministic fanout")
+    return candidate
+
+
 def _validate_receipt_binding(
     order: Mapping[str, Any],
     receipt: Mapping[str, Any],
@@ -341,6 +364,47 @@ def _validate_receipt_binding(
         raise ReceiptValidationError("receipt verification.errors must be a string list")
 
     return candidate, expected
+
+
+def build_fixture_attempt_receipt(
+    work_order: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    *,
+    passed: bool,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+) -> dict[str, Any]:
+    """Build a self-validating receipt for the secretless Actions fixture executor."""
+
+    order = validate_work_order(work_order)
+    bound = validate_attempt(order, attempt)
+    started = started_at or _now_rfc3339()
+    finished = finished_at or _now_rfc3339()
+    receipt = {
+        "schema_version": ATTEMPT_RECEIPT_VERSION,
+        "work_order_id": order["work_order_id"],
+        "attempt_id": bound["attempt_id"],
+        "generation": order["generation"],
+        "base_sha": order["base_sha"],
+        "destination": bound["destination"],
+        "started_at": started,
+        "finished_at": finished,
+        "status": "completed" if passed else "failed",
+        "checkpoint": {
+            "checkpoint_id": f"checkpoint_{bound['attempt_id']}",
+            "completed_stage_ids": ["checkout", "execute", "verify"],
+            "next_stage_id": None,
+            "artifact_ref": f"checkpoint/{bound['attempt_id']}.json",
+        },
+        "verification": {
+            "passed": bool(passed),
+            "checks": ["workorder-contract-tests"],
+            "errors": [] if passed else ["workorder contract tests failed"],
+        },
+        "model_reported_done": False,
+    }
+    _validate_receipt_binding(order, receipt, allow_checkpointed=False)
+    return receipt
 
 
 def fanin(values: Mapping[str, Any], receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -450,6 +514,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     expand.add_argument("work_order")
     expand.add_argument("--output", required=True)
 
+    fixture_receipt = subparsers.add_parser("fixture-receipt")
+    fixture_receipt.add_argument("work_order")
+    fixture_receipt.add_argument("attempt")
+    fixture_receipt.add_argument(
+        "--verification-passed", choices=("true", "false"), required=True
+    )
+    fixture_receipt.add_argument("--output", required=True)
+
     collect = subparsers.add_parser("fanin")
     collect.add_argument("work_order")
     collect.add_argument("receipts", nargs="+")
@@ -465,6 +537,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = validate_work_order(_read_json(args.work_order))
     elif args.command == "fanout":
         result = fanout(_read_json(args.work_order))
+    elif args.command == "fixture-receipt":
+        result = build_fixture_attempt_receipt(
+            _read_json(args.work_order),
+            _read_json(args.attempt),
+            passed=args.verification_passed == "true",
+        )
     elif args.command == "fanin":
         result = fanin(
             _read_json(args.work_order),
@@ -490,7 +568,9 @@ __all__ = [
     "WORK_ORDER_VERSION",
     "WorkOrderValidationError",
     "advance_after_runner_loss",
+    "build_fixture_attempt_receipt",
     "fanin",
     "fanout",
+    "validate_attempt",
     "validate_work_order",
 ]
