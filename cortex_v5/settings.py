@@ -38,6 +38,8 @@ class Settings:
     max_tool_rounds: int = 20
     default_max_tokens: int = 4096
     model_inactivity_seconds: int = 300
+    litellm_timeout: float = 120.0
+    fossil_url: str = ""
 
     @classmethod
     def from_env(
@@ -93,6 +95,11 @@ class Settings:
             model_inactivity_seconds=max(
                 1, _integer(values, "CORTEX_V5_MODEL_INACTIVITY_SECONDS", 300)
             ),
+            litellm_timeout=max(
+                30.0,
+                float(_first(values, "CORTEX_V5_LITELLM_TIMEOUT", default="120.0")),
+            ),
+            fossil_url=_first(values, "CORTEX_V5_FOSSIL_URL", "FOSSIL_URL").rstrip("/"),
         )
 
     def public(self) -> dict[str, object]:
@@ -107,4 +114,6 @@ class Settings:
             "max_tool_rounds": self.max_tool_rounds,
             "default_max_tokens": self.default_max_tokens,
             "model_inactivity_seconds": self.model_inactivity_seconds,
+            "litellm_timeout": self.litellm_timeout,
+            "fossil_configured": bool(self.fossil_url),
         }

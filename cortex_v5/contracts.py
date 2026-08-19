@@ -15,6 +15,7 @@ class TaskStatus(StrEnum):
     WAITING_FOR_MODEL = "waiting_for_model"
     VERIFYING = "verifying"
     COMPLETED = "completed"
+    SKIPPED = "skipped"
     FAILED = "failed"
 
 

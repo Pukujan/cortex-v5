@@ -6,15 +6,18 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from .contracts import ModelChoice, SinkResult, TaskStatus
+from .fossil import FossilClient
 from .journal import Journal
 from .litellm import LiteLLMClient
 from .methodology import MethodologyEngine
 from .observability import EventRecorder, sanitize
+from .pipeline import MechanicalPipeline, requires_multi_route, select_panel
+from .receipts import ReceiptStore, decide_skip, sha256_bytes
 from .seating import SeatingManager
 from .settings import Settings
 from .tools import ToolExecutor
@@ -57,16 +60,20 @@ class CortexRuntime:
         self.litellm = litellm or LiteLLMClient(
             settings.litellm_url,
             api_key=settings.litellm_api_key,
+            timeout=settings.litellm_timeout,
             event_callback=None,
         )
         self.clock = clock
         self.sleeper = sleeper
+        self.receipts = ReceiptStore(settings.data_dir)
+        self.fossil = FossilClient(settings.fossil_url)
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def close(self) -> None:
         await self.litellm.aclose()
         self.recorder.close()
         self.journal.close()
+        self.fossil.close()
 
     def _workspace(self, requested: str | None) -> Path:
         root = Path(requested or self.settings.allowed_root).expanduser().resolve(strict=True)
@@ -132,6 +139,10 @@ class CortexRuntime:
             "acceptance": acceptance,
             "max_tokens": int(values.get("max_tokens") or self.settings.default_max_tokens),
             "metadata": sanitize(dict(values.get("metadata") or {})),
+            "idempotency_key": str(values.get("idempotency_key") or "").strip() or None,
+            "issue_id": values.get("issue_id"),
+            "issue_state": values.get("issue_state"),
+            "models": [str(item) for item in (values.get("models") or []) if str(item).strip()],
             "verification": dict(values.get("verification") or {}),
             "status": str(status),
             "methodology": decision.to_dict(),
@@ -176,6 +187,15 @@ class CortexRuntime:
                 "question_count": len(decision.questions),
             },
         )
+        skip = self._skip_verdict(task)
+        task["skip_decision"] = skip
+        if skip["decision"] == "skip":
+            task["status"] = str(TaskStatus.SKIPPED)
+            task["updated_at"] = self.clock()
+            self.journal.put(task_id, task)
+            await self._record(task_id, "task.skipped", {"reasons": skip["reasons"]})
+        else:
+            self.journal.put(task_id, task)
         return self.task_snapshot(task_id)
 
     async def answer(self, task_id: str, answers: Mapping[str, Any]) -> dict[str, Any]:
@@ -277,7 +297,7 @@ class CortexRuntime:
         lock = self._locks.setdefault(task_id, asyncio.Lock())
         async with lock:
             task = self.get_task(task_id)
-            if task["status"] == TaskStatus.COMPLETED:
+            if task["status"] in {TaskStatus.COMPLETED, TaskStatus.SKIPPED}:
                 return self.task_snapshot(task_id)
             if task["status"] == TaskStatus.WAITING_FOR_HUMAN:
                 raise RuntimeErrorState("human answers are required before execution")
@@ -306,6 +326,35 @@ class CortexRuntime:
             seats = SeatingManager(state=self.journal.get_model_state(_GLOBAL_SEATING_STATE, {}))
             forced_model: str | None = None
             invocation_start_attempts = int(task.get("attempt_count", 0))
+
+            if requires_multi_route(task):
+                try:
+                    catalog = await self.litellm.refresh_models()
+                except Exception as exc:
+                    task["status"] = str(TaskStatus.WAITING_FOR_MODEL)
+                    task["waiting_reason"] = "live_catalog_unavailable"
+                    task["next_eligible_at"] = self.clock() + _RETRY_DELAY_SECONDS
+                    task["last_error"] = type(exc).__name__
+                    task["updated_at"] = self.clock()
+                    self.journal.put(task_id, task)
+                    await self._record(
+                        task_id,
+                        "model.catalog_failure",
+                        {"error_type": type(exc).__name__, "pipeline": True},
+                    )
+                    return self.task_snapshot(task_id)
+                panel = select_panel(
+                    seats, catalog, task=task, now=self.clock(), size=2
+                )
+                if len(panel) >= 2:
+                    return await self._run_pipeline(
+                        task_id, task, seats, workspace, verification, catalog
+                    )
+                await self._record(
+                    task_id,
+                    "pipeline.fallback_single_seat",
+                    {"available_models": list(panel), "reason": "fewer_than_two_live_models"},
+                )
 
             while (
                 int(task.get("attempt_count", 0)) - invocation_start_attempts
@@ -505,6 +554,7 @@ class CortexRuntime:
                     task["status"] = str(TaskStatus.COMPLETED)
                     task["completed_at"] = self.clock()
                     task["updated_at"] = self.clock()
+                    task["execution_receipt"] = self._record_execution_receipt(task)
                     self.journal.put(task_id, task)
                     self.journal.append_outcome(
                         task_id,
@@ -603,6 +653,155 @@ class CortexRuntime:
                 },
             )
             return self.task_snapshot(task_id)
+
+    async def _run_pipeline(
+        self,
+        task_id: str,
+        task: dict[str, Any],
+        seats: SeatingManager,
+        workspace: Path,
+        verification: VerificationGate,
+        catalog: Sequence[str],
+    ) -> dict[str, Any]:
+        task["status"] = str(TaskStatus.RUNNING)
+        task["updated_at"] = self.clock()
+        self.journal.put(task_id, task)
+
+        pipeline = MechanicalPipeline(
+            litellm=self.litellm,
+            fossil=self.fossil,
+            clock=self.clock,
+            tool_loop=self._tool_loop,
+            max_tokens=int(task.get("max_tokens") or self.settings.default_max_tokens),
+            max_tool_rounds=self.settings.max_tool_rounds,
+        )
+        panel_root = self.settings.data_dir / "pipeline" / task_id
+        result = await pipeline.run(
+            task,
+            seats=seats,
+            catalog=catalog,
+            workspace=workspace,
+            panel_root=panel_root,
+        )
+        task = self.get_task(task_id)
+        task["pipeline"] = result.to_dict()
+        task["attempt_count"] = int(task.get("attempt_count", 0)) + max(1, len(result.models))
+        task["generation"] = int(task.get("generation", 0)) + 1
+        task["model"] = result.winner
+        task["successful_tool_calls"] = int(result.winner_tool_calls)
+        task["updated_at"] = self.clock()
+        await self._record(
+            task_id,
+            "pipeline.completed",
+            {
+                "ok": result.ok,
+                "mode": result.mode,
+                "models": list(result.models),
+                "winner": result.winner,
+                "errors": list(result.errors),
+            },
+        )
+        if not result.ok:
+            task["status"] = str(TaskStatus.FAILED)
+            task["failure_reason"] = ",".join(result.errors) or "pipeline_failed"
+            self.journal.put(task_id, task)
+            return self.task_snapshot(task_id)
+
+        output = f"pipeline winner {result.winner}"
+        task["output"] = output
+        task["status"] = str(TaskStatus.VERIFYING)
+        self.journal.put(task_id, task)
+        verified = await asyncio.to_thread(
+            verification.verify,
+            task=task,
+            output=output,
+            methodology_ambiguous=bool(task["methodology"].get("ambiguous")),
+            successful_tool_calls=int(task.get("successful_tool_calls", 0)),
+            telemetry=task.get("telemetry"),
+        )
+        task["verification_result"] = verified.to_dict()
+        if verified.passed:
+            task["status"] = str(TaskStatus.COMPLETED)
+            task["completed_at"] = self.clock()
+            task["execution_receipt"] = self._record_execution_receipt(task)
+        else:
+            task["status"] = str(TaskStatus.FAILED)
+            task["failure_reason"] = "pipeline_verification_failed"
+        task["updated_at"] = self.clock()
+        self.journal.put(task_id, task)
+        return self.task_snapshot(task_id)
+
+    def _hashes(self, task: Mapping[str, Any]) -> tuple[str, str]:
+        spec = dict(task.get("verification") or {})
+        required = [str(item) for item in spec.get("required_files") or ()]
+        workspace = Path(str(task["workspace"]))
+        if required:
+            from .receipts import sha256_paths
+
+            outputs = sha256_paths(workspace, required)
+        else:
+            outputs = sha256_bytes(str(task.get("acceptance") or "").encode("utf-8"))
+        inputs = sha256_bytes(
+            json.dumps(
+                {
+                    "prompt": task.get("prompt"),
+                    "acceptance": task.get("acceptance"),
+                    "required_files": required,
+                    "commands": list(spec.get("commands") or []),
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        return inputs, outputs
+
+    def _skip_verdict(self, task: Mapping[str, Any]) -> dict[str, Any]:
+        key = str(task.get("idempotency_key") or "").strip()
+        if not key:
+            return {
+                "decision": "open",
+                "reasons": ["idempotency_key_missing"],
+                "receipt": None,
+                "authority": "execution_receipt",
+            }
+        inputs_hash, outputs_hash = self._hashes(task)
+        return decide_skip(
+            self.receipts,
+            idempotency_key=key,
+            live_inputs_hash=inputs_hash,
+            live_outputs_hash=outputs_hash,
+            issue_state=str(task.get("issue_state") or ""),
+        )
+
+    def _record_execution_receipt(self, task: Mapping[str, Any]) -> dict[str, Any]:
+        key = str(task.get("idempotency_key") or task["task_id"])
+        inputs_hash, outputs_hash = self._hashes(task)
+        record = self.receipts.append(
+            {
+                "idempotency_key": key,
+                "inputs_hash": inputs_hash,
+                "outputs_hash": outputs_hash,
+                "test_ids": list((task.get("verification") or {}).get("commands") or []),
+                "issue_id": task.get("issue_id"),
+                "issue_state": task.get("issue_state") or "closed",
+                "task_id": task["task_id"],
+                "origin": "verification_gate",
+                "created_at": self.clock(),
+            }
+        )
+        fossil = self.fossil.propose(
+            {
+                "event_type": "claim.proposed",
+                "payload": {
+                    "kind": "execution_receipt",
+                    "idempotency_key": key,
+                    "inputs_hash": inputs_hash,
+                    "outputs_hash": outputs_hash,
+                },
+            }
+        )
+        record["fossil"] = fossil
+        return record
 
     @staticmethod
     def _choose_model(
