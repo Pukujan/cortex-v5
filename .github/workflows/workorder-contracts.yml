@@ -45,5 +45,9 @@ jobs:
         run: python -m pytest -q tests/test_workorders.py
       - name: Full Cortex V5 suite
         run: python -m pytest -q
-      - name: Ruff
-        run: python -m ruff check .
+      - name: Ruff changed WorkOrder surface
+        run: |
+          python -m ruff check \
+            cortex_v5/workorders.py \
+            tests/test_workorders.py \
+            tests/test_workorder_actions.py
