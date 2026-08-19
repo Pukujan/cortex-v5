@@ -1,5 +1,7 @@
 # Cortex V5 — Model Seating Research & Design Notes (2026-08)
 
+PLEASE NOTE LITELLM TIMEOUT IS 600 seconds for all models, please use give pre-granulated tasks otherwise they will fail to finish their task
+
 **Status:** Research / design notes. Not a normative spec.
 **Last updated:** 2026-08-14
 **Scope:** Empirical grounding for the deterministic live-catalog seating policy,
