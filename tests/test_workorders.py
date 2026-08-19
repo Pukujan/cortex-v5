@@ -123,6 +123,14 @@ def test_fanin_uses_mechanical_verification_not_model_authored_done() -> None:
     assert closeout["model_authored_done_is_authority"] is False
 
 
+def test_fanin_requires_every_current_generation_attempt_before_closeout() -> None:
+    order = _work_order()
+    first_attempt = fanout(order)[0]
+
+    with pytest.raises(ReceiptValidationError, match="terminal receipt for every"):
+        fanin(order, [_completed_receipt(first_attempt)])
+
+
 def test_fanin_rejects_duplicate_stale_late_and_mismatched_receipts() -> None:
     order = _work_order()
     attempt = fanout(order)[0]
@@ -133,7 +141,7 @@ def test_fanin_rejects_duplicate_stale_late_and_mismatched_receipts() -> None:
 
     stale = copy.deepcopy(receipt)
     stale["generation"] = order["generation"] - 1
-    with pytest.raises(ReceiptValidationError, match="generation"):
+    with pytest.raises(ReceiptValidationError, match="receipt generation"):
         fanin(order, [stale])
 
     late = copy.deepcopy(receipt)
@@ -176,7 +184,7 @@ def test_runner_death_recovery_advances_generation_and_fences_old_receipts() -> 
     assert successor["resume_from_checkpoint_id"] == "checkpoint_runner_died_after_execute"
 
     stale_success = _completed_receipt(old_attempt, passed=True)
-    with pytest.raises(ReceiptValidationError, match="generation"):
+    with pytest.raises(ReceiptValidationError, match="receipt generation"):
         fanin(recovered, [stale_success])
 
 
