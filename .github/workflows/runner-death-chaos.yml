@@ -1,0 +1,33 @@
+name: runner-death-chaos
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runner-death:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CORTEX_SOFTWARE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact target checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${CORTEX_SOFTWARE_COMMIT}"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Cortex V5
+        run: python -m pip install -e '.[test]'
+      - name: Prove generation-advancing fresh-runner reconciliation
+        run: |
+          python -m pytest -q \
+            tests/test_workorders.py::test_runner_death_recovery_advances_generation_and_fences_old_receipts \
+            tests/test_workorders.py::test_runner_death_recovery_rejects_completed_or_unbound_checkpoint
