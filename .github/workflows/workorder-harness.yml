@@ -1,0 +1,122 @@
+name: Secretless WorkOrder harness
+
+on:
+  pull_request:
+    paths:
+      - "cortex_v5/workorders.py"
+      - "tests/test_workorders.py"
+      - "tests/test_workorder_actions.py"
+      - ".github/workflows/workorder-*.yml"
+      - ".github/workflows/runner-death-chaos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      work_order: ${{ steps.order.outputs.work_order }}
+    env:
+      CORTEX_SOFTWARE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Materialize current-head secretless fixture WorkOrder
+        id: order
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import UTC, datetime, timedelta
+
+          order = {
+              "schema_version": "cortex.workorder.v1",
+              "work_order_id": f"wo_actions_{os.environ['GITHUB_RUN_ID']}_{os.environ['GITHUB_RUN_ATTEMPT']}",
+              "repo": os.environ["GITHUB_REPOSITORY"],
+              "base_sha": os.environ["CORTEX_SOFTWARE_COMMIT"],
+              "objective": "Prove secretless Cortex V5 disposable-runner orchestration.",
+              "acceptance": {
+                  "commands": ["python -m pytest -q tests/test_workorders.py"],
+                  "required_files": ["cortex_v5/workorders.py"],
+              },
+              "risk": ["code_change", "disposable_compute"],
+              "deadline": (datetime.now(UTC) + timedelta(minutes=30)).isoformat().replace(
+                  "+00:00", "Z"
+              ),
+              "idempotency_key": f"actions:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}",
+              "correlation": {
+                  "project_issue_id": "fossil-core#94",
+                  "task_id": "CORTEX-02",
+                  "trace_id": f"gha_{os.environ['GITHUB_RUN_ID']}",
+              },
+              "generation": 1,
+              "attempt_count": 2,
+              "max_parallel": 2,
+          }
+          compact = json.dumps(order, sort_keys=True, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"work_order={compact}\n")
+          PY
+
+  preflight:
+    needs: prepare
+    uses: ./.github/workflows/workorder-preflight.yml
+    with:
+      work_order_json: ${{ needs.prepare.outputs.work_order }}
+
+  fanout:
+    needs: preflight
+    uses: ./.github/workflows/workorder-fanout.yml
+    with:
+      work_order_json: ${{ needs.preflight.outputs.work_order }}
+
+  attempt:
+    needs: [preflight, fanout]
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.fanout.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.fanout.outputs.matrix) }}
+    uses: ./.github/workflows/workorder-attempt.yml
+    with:
+      work_order_json: ${{ needs.preflight.outputs.work_order }}
+      attempt_json: ${{ toJSON(matrix) }}
+
+  fanin:
+    if: ${{ always() }}
+    needs: [preflight, attempt]
+    uses: ./.github/workflows/workorder-fanin.yml
+    with:
+      work_order_json: ${{ needs.preflight.outputs.work_order }}
+
+  runner-death:
+    uses: ./.github/workflows/runner-death-chaos.yml
+
+  terminal-gate:
+    if: ${{ always() }}
+    needs: [fanin, runner-death]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLOSEOUT_JSON: ${{ needs.fanin.outputs.closeout_json }}
+      FANIN_RESULT: ${{ needs.fanin.result }}
+      RUNNER_DEATH_RESULT: ${{ needs.runner-death.result }}
+    steps:
+      - name: Require mechanical closeout and runner-death proof
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          if os.environ["FANIN_RESULT"] != "success":
+              raise SystemExit("fanin did not complete successfully")
+          if os.environ["RUNNER_DEATH_RESULT"] != "success":
+              raise SystemExit("runner-death proof did not complete successfully")
+          closeout = json.loads(os.environ["CLOSEOUT_JSON"])
+          if closeout.get("status") != "PASS":
+              raise SystemExit("mechanical WorkOrder closeout is not PASS")
+          if closeout.get("model_authored_done_is_authority") is not False:
+              raise SystemExit("model-authored done must never be closeout authority")
+          PY
