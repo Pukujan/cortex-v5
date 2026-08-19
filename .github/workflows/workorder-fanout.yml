@@ -1,0 +1,76 @@
+name: workorder-fanout
+
+on:
+  workflow_call:
+    inputs:
+      work_order_json:
+        required: true
+        type: string
+    outputs:
+      matrix:
+        value: ${{ jobs.fanout.outputs.matrix }}
+      max_parallel:
+        value: ${{ jobs.fanout.outputs.max_parallel }}
+
+permissions:
+  contents: read
+
+jobs:
+  fanout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.emit.outputs.matrix }}
+      max_parallel: ${{ steps.emit.outputs.max_parallel }}
+    env:
+      CORTEX_SOFTWARE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      WORK_ORDER_JSON: ${{ inputs.work_order_json }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Cortex V5
+        run: python -m pip install -e '.[test]'
+      - name: Materialize validated target
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          order = json.loads(os.environ["WORK_ORDER_JSON"])
+          if order.get("repo") != os.environ["GITHUB_REPOSITORY"]:
+              raise SystemExit("WorkOrder repo does not match workflow repository")
+          if order.get("base_sha") != os.environ["CORTEX_SOFTWARE_COMMIT"]:
+              raise SystemExit("WorkOrder base_sha does not match exact workflow checkout")
+          Path("build/workorder").mkdir(parents=True, exist_ok=True)
+          Path("build/workorder/order.json").write_text(
+              json.dumps(order, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Expand flat bounded fanout
+        run: |
+          python -m cortex_v5.workorders fanout \
+            build/workorder/order.json \
+            --output build/workorder/attempts.json
+      - name: Emit matrix
+        id: emit
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          order = json.load(open("build/workorder/order.json", encoding="utf-8"))
+          attempts = json.load(open("build/workorder/attempts.json", encoding="utf-8"))
+          matrix = json.dumps({"include": attempts}, sort_keys=True, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"matrix={matrix}\n")
+              output.write(f"max_parallel={order['max_parallel']}\n")
+          PY
