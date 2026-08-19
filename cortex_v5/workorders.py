@@ -1,7 +1,7 @@
 """Secretless disposable-runner WorkOrder contracts for Cortex V5.
 
 GitHub Actions is a replaceable transport/execution surface, not the V5 runtime
-or durable truth.  These helpers validate bounded WorkOrders, derive isolated
+or durable truth. These helpers validate bounded WorkOrders, derive isolated
 attempt destinations, mechanically fence receipts, and model runner-loss
 recovery by advancing a generation from an immutable checkpoint.
 """
@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,7 @@ def _parse_timestamp(value: Any, field: str, error_type: type[ValueError]) -> da
         raise error_type(f"{field} must be a valid RFC3339 timestamp") from exc
     if parsed.tzinfo is None:
         raise error_type(f"{field} must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _require_string(value: Any, field: str) -> str:
@@ -130,7 +130,9 @@ def validate_work_order(values: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(acceptance, Mapping):
         raise WorkOrderValidationError("acceptance must be an object")
     candidate["acceptance"] = {
-        "commands": _require_string_list(acceptance.get("commands"), "acceptance.commands"),
+        "commands": _require_string_list(
+            acceptance.get("commands"), "acceptance.commands"
+        ),
         "required_files": _require_string_list(
             acceptance.get("required_files", []),
             "acceptance.required_files",
@@ -183,8 +185,12 @@ def validate_work_order(values: Mapping[str, Any]) -> dict[str, Any]:
             "recovery.completed_stage_ids",
             allow_empty=True,
         )
-        checkpoint_id = _require_string(recovery.get("checkpoint_id"), "recovery.checkpoint_id")
-        artifact_ref = _require_string(recovery.get("artifact_ref"), "recovery.artifact_ref")
+        checkpoint_id = _require_string(
+            recovery.get("checkpoint_id"), "recovery.checkpoint_id"
+        )
+        artifact_ref = _require_string(
+            recovery.get("artifact_ref"), "recovery.artifact_ref"
+        )
         next_stage_id = recovery.get("next_stage_id")
         if not isinstance(next_stage_id, str) or not next_stage_id.strip():
             raise WorkOrderValidationError("recovery.next_stage_id must be a non-empty string")
@@ -210,7 +216,8 @@ def _attempt_id(order: Mapping[str, Any], index: int) -> str:
             str(order["idempotency_key"]),
         )
     )
-    return f"attempt_{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"attempt_{digest[:24]}"
 
 
 def fanout(values: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -263,20 +270,19 @@ def _validate_receipt_binding(
         raise ReceiptValidationError(
             f"receipt schema_version must be {ATTEMPT_RECEIPT_VERSION}"
         )
+    if candidate.get("work_order_id") != order["work_order_id"]:
+        raise ReceiptValidationError("receipt work_order_id does not match the WorkOrder")
+    if candidate.get("generation") != order["generation"]:
+        raise ReceiptValidationError("receipt generation does not match the WorkOrder")
+    if candidate.get("base_sha") != order["base_sha"]:
+        raise ReceiptValidationError("receipt base_sha does not match the WorkOrder")
+
     attempt_id = candidate.get("attempt_id")
     if not isinstance(attempt_id, str) or attempt_id not in expected_attempts:
         raise ReceiptValidationError("attempt_id is not bound to this WorkOrder generation")
     expected = expected_attempts[attempt_id]
-
-    exact_fields = {
-        "work_order_id": order["work_order_id"],
-        "generation": order["generation"],
-        "base_sha": order["base_sha"],
-        "destination": expected["destination"],
-    }
-    for field, expected_value in exact_fields.items():
-        if candidate.get(field) != expected_value:
-            raise ReceiptValidationError(f"receipt {field} does not match the WorkOrder")
+    if candidate.get("destination") != expected["destination"]:
+        raise ReceiptValidationError("receipt destination does not match the WorkOrder attempt")
 
     status = candidate.get("status")
     allowed_statuses = set(_TERMINAL_RECEIPT_STATUSES)
@@ -286,7 +292,9 @@ def _validate_receipt_binding(
         expected_status = "terminal or checkpointed" if allow_checkpointed else "terminal"
         raise ReceiptValidationError(f"receipt status must be {expected_status}")
 
-    started = _parse_timestamp(candidate.get("started_at"), "started_at", ReceiptValidationError)
+    started = _parse_timestamp(
+        candidate.get("started_at"), "started_at", ReceiptValidationError
+    )
     finished = _parse_timestamp(
         candidate.get("finished_at"), "finished_at", ReceiptValidationError
     )
@@ -321,7 +329,9 @@ def _validate_receipt_binding(
         raise ReceiptValidationError("checkpoint next_stage_id must not already be completed")
 
     verification = candidate.get("verification")
-    if not isinstance(verification, Mapping) or not isinstance(verification.get("passed"), bool):
+    if not isinstance(verification, Mapping) or not isinstance(
+        verification.get("passed"), bool
+    ):
         raise ReceiptValidationError("receipt verification.passed must be boolean")
     checks = verification.get("checks")
     errors = verification.get("errors")
