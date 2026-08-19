@@ -57,10 +57,17 @@ def test_fanin_downloads_receipts_and_never_uses_model_done_as_gate() -> None:
     assert "model_reported_done" not in text
 
 
-def test_runner_death_chaos_is_deterministic_and_secretless() -> None:
+def test_runner_death_chaos_crosses_a_real_fresh_runner_boundary() -> None:
     text = _workflow("runner-death-chaos.yml")
 
     assert "workflow_dispatch:" in text
+    assert "continue-on-error: true" in text
+    assert "actions/upload-artifact@v4" in text
+    assert "actions/download-artifact@v4" in text
+    assert "Deliberately terminate disposable runner after checkpoint" in text
+    assert "run: exit 42" in text
+    assert "recover-on-fresh-runner:" in text
+    assert "python -m cortex_v5.workorders recover" in text
     assert "test_runner_death_recovery_advances_generation_and_fences_old_receipts" in text
     assert "test_runner_death_recovery_rejects_completed_or_unbound_checkpoint" in text
 
